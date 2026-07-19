@@ -8,23 +8,7 @@ use PDO;
 
 class SyncService
 {
-    public function syncAll()
-    {
-        $results = [];
-        $tables = config('sync.tables');
-
-        $api = new ApiService();
-        $test = $api->ping();
-        if (!$test['success']) {
-            return ['error' => 'API not reachable: ' . ($test['error'] ?? '')];
-        }
-
-        foreach ($tables as $table => $config) {
-            $results[$table] = $this->syncTable($table, $config);
-        }
-
-        return $results;
-    }
+    private ?PDO $conn = null;
 
     public function syncTable($table, $config, ?callable $onProgress = null)
     {
@@ -34,77 +18,97 @@ class SyncService
         $trackTrf = $config['track_trf'] ?? false;
         $api = new ApiService();
 
+        $total = 0;
+        $errors = [];
+        $batch = [];
+        $pairBatch = [];
+        $totalValid = 0;
+        $batchNum = 0;
+        $totalBatches = $onProgress ? $this->countBatches($table, $config, $batchSize) : 0;
+
         try {
-            $rawData = $this->fetchData($table, $config);
+            foreach ($this->fetchData($table, $config) as $rawRow) {
+                $mapped = $this->mapToClickhouseColumns($rawRow, $overrides);
 
-            if (empty($rawData)) {
-                return ['success' => true, 'synced' => 0, 'message' => 'No data'];
-            }
-
-            $pairs = [];
-            foreach ($rawData as $rawRow) {
-                $pairs[] = [
-                    'raw' => $rawRow,
-                    'mapped' => $this->mapToClickhouseColumns($rawRow, $overrides),
-                ];
-            }
-
-            $validPairs = array_values(array_filter($pairs, function ($p) use ($keyFields) {
                 foreach ($keyFields as $field) {
-                    if (!isset($p['mapped'][$field]) || $p['mapped'][$field] === '' || $p['mapped'][$field] === null) {
-                        return false;
+                    if (!isset($mapped[$field]) || $mapped[$field] === '' || $mapped[$field] === null) {
+                        continue 2;
                     }
                 }
-                return true;
-            }));
 
-            if (empty($validPairs)) {
-                return ['success' => false, 'error' => 'No valid data'];
-            }
-
-            $validData = array_map(function ($p) {
                 $clean = [];
-                foreach ($p['mapped'] as $k => $v) {
+                foreach ($mapped as $k => $v) {
                     $clean[$k] = is_string($v) ? trim(strip_tags($v)) : $v;
                 }
-                return $clean;
-            }, $validPairs);
 
-            $total = 0;
-            $errors = [];
-            $batches = array_chunk($validData, $batchSize);
-            $pairBatches = array_chunk($validPairs, $batchSize);
-            $totalBatches = count($batches);
+                $batch[] = $clean;
+                $pairBatch[] = ['raw' => $rawRow, 'mapped' => $clean];
+                $totalValid++;
 
-            foreach ($batches as $i => $batch) {
-                $response = $api->sync($table, $batch);
-                if ($response['success']) {
-                    $total += count($batch);
-                    if ($trackTrf) {
-                        $this->markSynced($config, $pairBatches[$i]);
-                    }
-                } else {
-                    $errors[] = "Batch " . ($i + 1) . ": " . ($response['error'] ?? 'Unknown');
+                if (count($batch) >= $batchSize) {
+                    $batchNum++;
+                    $this->sendBatch($table, $batch, $pairBatch, $trackTrf, $config, $api, $total, $errors);
+                    if ($onProgress) $onProgress($batchNum, $totalBatches);
+                    $batch = [];
+                    $pairBatch = [];
                 }
+            }
 
-                if ($onProgress) {
-                    $onProgress($i + 1, $totalBatches);
-                }
+            if (!empty($batch)) {
+                $batchNum++;
+                $this->sendBatch($table, $batch, $pairBatch, $trackTrf, $config, $api, $total, $errors);
+                if ($onProgress) $onProgress($batchNum, $totalBatches);
+            }
+
+            if ($totalValid === 0) {
+                return ['success' => false, 'error' => 'No valid data'];
             }
 
             return [
                 'success' => empty($errors),
                 'synced' => $total,
-                'total' => count($validData),
+                'total' => $totalValid,
                 'errors' => $errors,
             ];
-
         } catch (\Exception $e) {
             return [
                 'success' => false,
                 'error' => $e->getMessage(),
             ];
         }
+    }
+
+    private function sendBatch(
+        string $table,
+        array $batch,
+        array $pairBatch,
+        bool $trackTrf,
+        array $config,
+        ApiService $api,
+        int &$total,
+        array &$errors
+    ): void {
+        $response = $api->sync($table, $batch);
+        if ($response['success']) {
+            $total += count($batch);
+            if ($trackTrf) {
+                $this->markSynced($config, $pairBatch);
+            }
+        } else {
+            $errors[] = "Batch gagal (" . count($batch) . " baris): " . ($response['error'] ?? 'Unknown');
+        }
+    }
+
+    private function countBatches($table, $config, int $batchSize): int
+    {
+        $conn = $this->getDBConnection();
+        $sourceTable = $config['source_table'];
+        $where = ($config['track_trf'] ?? false)
+            ? "WHERE [trf] = 0 OR ([Batal] = 1 AND [trfbatal] = 0)"
+            : '';
+        $stmt = $conn->query("SELECT COUNT(*) AS cnt FROM [$sourceTable] $where");
+        $count = (int) $stmt->fetch(PDO::FETCH_ASSOC)['cnt'];
+        return $batchSize > 0 ? (int) ceil($count / $batchSize) : 0;
     }
 
     private function markSynced(array $config, array $pairs): void
@@ -146,21 +150,18 @@ class SyncService
         }
     }
 
-    private function fetchData($table, $config)
+    private function fetchData($table, $config, int $limit = 500): \Generator
     {
-        if (!isset($config['source_table'])) {
-            throw new \Exception("Konfigurasi 'source_table' tidak ditemukan untuk tabel '$table'.");
-        }
         $conn = $this->getDBConnection();
         $sourceTable = $config['source_table'];
+        $where = ($config['track_trf'] ?? false)
+            ? "WHERE [trf] = 0 OR ([Batal] = 1 AND [trfbatal] = 0)"
+            : '';
 
-        $where = '';
-        if ($config['track_trf'] ?? false) {
-            $where = "WHERE [trf] = 0 OR ([Batal] = 1 AND [trfbatal] = 0)";
+        $stmt = $conn->query("SELECT TOP ($limit) * FROM [$sourceTable] $where");
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            yield $row;
         }
-
-        $stmt = $conn->query("SELECT * FROM [$sourceTable] $where");
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
     private function mapToClickhouseColumns(array $row, array $overrides = []): array
@@ -173,8 +174,12 @@ class SyncService
         return $mapped;
     }
 
-    private function getDBConnection()
+    private function getDBConnection(): PDO
     {
+        if ($this->conn) {
+            return $this->conn;
+        }
+
         $host = env('DB_SYNC_HOST');
         $port = env('DB_SYNC_PORT', '1433');
         $db = env('DB_SYNC_DATABASE');
@@ -183,31 +188,9 @@ class SyncService
 
         $dsn = "sqlsrv:Server=$host,$port;Database=$db;TrustServerCertificate=true";
 
-        return new PDO($dsn, $user, $pass, [
+        return $this->conn = new PDO($dsn, $user, $pass, [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]);
-    }
-
-    private function validateData($data, $keyFields)
-    {
-        $valid = [];
-        foreach ($data as $row) {
-            $ok = true;
-            foreach ($keyFields as $field) {
-                if (!isset($row[$field]) || $row[$field] === '' || $row[$field] === null) {
-                    $ok = false;
-                    break;
-                }
-            }
-            if ($ok) {
-                $clean = [];
-                foreach ($row as $k => $v) {
-                    $clean[$k] = is_string($v) ? trim(strip_tags($v)) : $v;
-                }
-                $valid[] = $clean;
-            }
-        }
-        return $valid;
     }
 }

@@ -6,52 +6,38 @@ use GuzzleHttp\Client;
 
 class ApiService
 {
-    public function sync($table, $data)
-    {
-        $baseUrl = rtrim(env('API_BASE_URL'), '/');
-        $url = "$baseUrl/sync/$table";
+    private Client $client;
 
-        $client = new Client([
+    public function __construct()
+    {
+        $this->client = new Client([
+            'base_uri' => rtrim(env('API_BASE_URL'), '/') . '/',
             'timeout' => 30,
             'headers' => [
                 'Content-Type' => 'application/json',
                 'Accept' => 'application/json',
             ],
         ]);
+    }
 
+    public function sync($table, $data)
+    {
         try {
-            $response = $client->post($url, ['json' => $data]);
-            return [
-                'success' => true,
-                'code' => $response->getStatusCode(),
-            ];
+            $response = $this->client->post("sync/$table", ['json' => $data]);
+            return ['success' => true, 'code' => $response->getStatusCode()];
         } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage(),
-            ];
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 
     public function ping()
     {
-        $baseUrl = rtrim(env('API_BASE_URL'), '/');
-        $url = "$baseUrl/ping";
-
-        $client = new Client(['timeout' => 10]);
-
         try {
-            $response = $client->get($url);
+            $response = $this->client->get('ping', ['timeout' => 10]);
             $body = json_decode($response->getBody(), true);
-            return [
-                'success' => $body['ok'] ?? false,
-                'code' => $response->getStatusCode(),
-            ];
+            return ['success' => $body['ok'] ?? false, 'code' => $response->getStatusCode()];
         } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'error' => $e->getMessage(),
-            ];
+            return ['success' => false, 'error' => $e->getMessage()];
         }
     }
 }
