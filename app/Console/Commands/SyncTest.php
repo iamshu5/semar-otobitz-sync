@@ -43,7 +43,7 @@ class SyncTest extends Command
             $conn = new PDO($dsn, $user, $pass);
             $conn->query('SELECT 1');
 
-            $this->info("✅ SQL SERVER OK");
+            $this->info("✅ SQL SERVER CONNECT SUKSES");
             $this->info("Host: $host:$port");
             $this->info("Database: $db");
         } catch (\Exception $e) {

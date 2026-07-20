@@ -13,6 +13,7 @@ class ApiService
         $this->client = new Client([
             'base_uri' => rtrim(env('API_BASE_URL'), '/') . '/',
             'timeout' => 30,
+            'connect_timeout' => 5,
             'headers' => [
                 'Content-Type' => 'application/json',
                 'Accept' => 'application/json',

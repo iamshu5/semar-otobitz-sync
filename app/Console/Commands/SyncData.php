@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Services\SyncService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 
 class SyncData extends Command
 {
@@ -12,53 +13,64 @@ class SyncData extends Command
 
     public function handle()
     {
-        $this->info('🔄 MULAI SYNC - ' . now());
+        $lock = Cache::lock('sync:data:command', 3600);
 
-        $sync = new SyncService();
+        if (!$lock->get()) {
+            $this->warn('⚠️ Sync sudah berjalan di proses lain!.');
+            return 0;
+        }
 
         try {
-            if ($table = $this->option('table')) {
-                $config = config("sync.tables.$table");
-                if (!$config) {
-                    $this->error("TABLE '$table' NOT FOUND!");
-                    return 1;
+            $this->info('🔄 MULAI SYNC - ' . now());
+
+            $sync = new SyncService();
+
+            try {
+                if ($table = $this->option('table')) {
+                    $config = config("sync.tables.$table");
+                    if (!$config) {
+                        $this->error("TABLE '$table' NOT FOUND!");
+                        return 1;
+                    }
+                    $this->info("📊 PROSES SYNC TABLE: $table");
+
+                    $bar = $this->output->createProgressBar();
+                    $bar->start();
+
+                    $result = $sync->syncTable($table, $config, function ($current, $total) use ($bar) {
+                        $bar->setMaxSteps($total);
+                        $bar->setProgress($current);
+                    });
+
+                    $bar->finish();
+                    $this->newLine(2);
+
+                    $results = [$table => $result];
+                } else {
+                    $this->info("📊 PROSES SYNC SEMUA TABLE...");
+                    $tables = config('sync.tables');
+                    $bar = $this->output->createProgressBar(count($tables));
+                    $bar->start();
+
+                    $results = [];
+                    foreach ($tables as $name => $config) {
+                        $results[$name] = $sync->syncTable($name, $config);
+                        $bar->advance();
+                    }
+                    $bar->finish();
+                    $this->newLine(2);
                 }
-                $this->info("📊 PROSES SYNC TABLE: $table");
 
-                $bar = $this->output->createProgressBar();
-                $bar->start();
+                $this->displayResults($results);
+                $this->info('✅ SYNC COMPLETED - ' . now());
+                return 0;
 
-                $result = $sync->syncTable($table, $config, function ($current, $total) use ($bar) {
-                    $bar->setMaxSteps($total);
-                    $bar->setProgress($current);
-                });
-
-                $bar->finish();
-                $this->newLine(2);
-
-                $results = [$table => $result];
-            } else {
-                $this->info("📊 PROSES SYNC SEMUA TABLE...");
-                $tables = config('sync.tables');
-                $bar = $this->output->createProgressBar(count($tables));
-                $bar->start();
-
-                $results = [];
-                foreach ($tables as $name => $config) {
-                    $results[$name] = $sync->syncTable($name, $config);
-                    $bar->advance();
-                }
-                $bar->finish();
-                $this->newLine(2);
+            } catch (\Exception $e) {
+                $this->error("❌ " . $e->getMessage());
+                return 1;
             }
-
-            $this->displayResults($results);
-            $this->info('✅ SYNC COMPLETED - ' . now());
-            return 0;
-
-        } catch (\Exception $e) {
-            $this->error("❌ " . $e->getMessage());
-            return 1;
+        } finally {
+            $lock->release();
         }
     }
 

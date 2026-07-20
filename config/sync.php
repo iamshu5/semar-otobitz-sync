@@ -8,30 +8,35 @@ return [
             'key_fields' => ['nomor', 'nomor_fakturselesai', 'norangka'],
             'overrides' => [],
             'track_trf' => true,
+            'update_field' => 'TglUpdate',
         ],
         'trnt_penerimaanstnkselesai' => [
             'source_table' => 'TrnT_PenerimaanSTNKSelesai',
             'key_fields' => ['nomor', 'nomor_pengajuanstnk', 'norangka'],
             'overrides' => [],
             'track_trf' => true,
+            'update_field' => 'TglUpdate',
         ],
         'trnt_pengajuandokumenlain' => [
             'source_table' => 'TrnT_PengajuanDokumenLain',
             'key_fields' => ['nomor'],
             'overrides' => [],
             'track_trf' => true,
+            'update_field' => 'TglUpdate',
         ],
         'trnt_penerimaandokumenlainselesai' => [
             'source_table' => 'TrnT_PenerimaanDokumenLainSelesai',
             'key_fields' => ['nomor'],
             'overrides' => [],
             'track_trf' => true,
+            'update_field' => 'TglUpdate',
         ],
         'trnt_datapengurusanstck' => [
             'source_table' => 'TrnT_DataPengurusanSTCK',
             'key_fields' => ['nomor', 'norangka', 'kodedealer'],
             'overrides' => [],
             'track_trf' => true,
+            'update_field' => 'TglUpdate',
         ],
 
         // CLICKHOUSE + POSTGRESQL
